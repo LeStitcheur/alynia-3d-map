@@ -50,12 +50,13 @@ Pré-requis : .NET SDK 10 et Node.js (uniquement pour régénérer le modèle, p
 - Les objets **vanilla GTA V** placés dans l'intérieur (≈ 2 500 occurrences : chaises, lits standards, plantes…) ne sont pas fournis dans la ressource : ils sont absents de la maquette. Seuls les modèles propres à l'Ocean Hospital sont affichés.
 - Même chose pour ~190 textures vanilla (routes, certains sols) : les surfaces concernées apparaissent en gris clair.
 - Les surfaces de salles sont calculées à partir des boîtes englobantes des « rooms » MLO : ce sont des ordres de grandeur, pas des surfaces au sol exactes.
+- La **morgue** est déclarée dans l'MLO (`R20morgue`) mais la ressource ne contient aucun modèle pour elle : elle est reconstituée procéduralement dans [public/morgue.js](public/morgue.js) (murs ouest/sud, sol, plafond, chambre froide 24 cases, tables d'autopsie, paillasse, brancard), calée sur la façade et le mur du garage existants.
 - L'intérieur `bm_middoc` (situé à 3 km, sans rapport avec l'hôpital) est ignoré.
 
 ## Structure
 
 ```
-public/            site servi (index.html, style.css, app.js, model/)
+public/            site servi (index.html, style.css, app.js, morgue.js, model/)
 server.js          serveur statique Node sans dépendance
 scripts/deploy.mjs npm run deploy
 tools/
@@ -64,3 +65,12 @@ tools/
 ```
 
 Les noms affichés des salles et les hauteurs d'étage se règlent en haut de `public/app.js` (`ROOM_NAMES`, `LEVELS`).
+
+## Performances
+
+Le modèle est découpé par l'exporteur en blocs par étage (`tile|<intérieur/extérieur/portes>|L0..L4|tall`). Le viewer :
+
+- n'affiche que l'étage sélectionné en vue maquette (≈ 1 M triangles au lieu de 3,5 M) ;
+- masque l'intérieur en vue d'ensemble tant que la caméra est hors du bâtiment ;
+- en visite, n'affiche que l'étage courant et ses voisins, dans la distance du brouillard ;
+- ne redessine la maquette que quand la caméra bouge, et ajuste la résolution si l'affichage ralentit.

@@ -91,6 +91,9 @@ static class Program
         foreach (var dd in DrawableDicts.Values) foreach (var d in dd.Values) AddEmbedded(d);
 
         Console.WriteLine($"drawables: {Drawables.Count}, ydd: {DrawableDicts.Count}, textures: {Textures.Count}, archetypes: {Archetypes.Count}, ymaps: {Ymaps.Count}");
+        if (Environment.GetEnvironmentVariable("DUMP_BOUNDS") == "1")
+            foreach (var kv in Drawables)
+                Console.WriteLine($"  bounds {JenkIndex.GetString(kv.Key)} min={kv.Value.BoundingBoxMin} max={kv.Value.BoundingBoxMax} archetype={Archetypes.ContainsKey(kv.Key)}");
     }
 
     static void AddEmbedded(DrawableBase d)
@@ -227,8 +230,11 @@ static class Program
             var n = nameHash.ToString();
             missing[n] = missing.TryGetValue(n, out var c) ? c + 1 : 1;
             if (mlo >= 0) MissingInMlo++;
+            if (arch != null) Console.WriteLine($"  archetype {arch.Name} defined but drawable not found (asset {arch.AssetName}, ydd {arch.DrawableDict})");
+            if (Environment.GetEnvironmentVariable("DUMP_ENTITIES") == "1") Console.WriteLine($"  MISSING mlo={mlo} room={room} {n}");
             return false;
         }
+        if (Environment.GetEnvironmentVariable("DUMP_ENTITIES") == "1") Console.WriteLine($"  OK mlo={mlo} room={room} {nameHash}");
         list.Add(new Instance
         {
             Name = nameHash.ToString(), Drawable = d,
@@ -248,6 +254,8 @@ class GltfBuilder
     readonly Dictionary<DrawableBase, int> meshIndex = new();
     readonly List<float> meshExtents = new();
     float meshExtent;
+    readonly List<(Vector3 min, Vector3 max)> meshBounds = new();
+    Vector3 curMin, curMax;
     readonly Dictionary<string, int> materialIndex = new();
     readonly Dictionary<string, int> textureIndex = new(StringComparer.OrdinalIgnoreCase);
     int texMissing, texFailed;
@@ -258,7 +266,12 @@ class GltfBuilder
     public void Build(List<Program.Instance> instances, List<Program.MloInfo> mlos)
     {
         Vector3 centre = mlos.Count > 0 ? mlos[0].Position : Vector3.Zero;
-        var interiorNodes = new List<int>(); var exteriorNodes = new List<int>(); var doorNodes = new List<int>();
+        // category -> level band -> node indices. Bands let the viewer hide whole floors
+        // (section plane, walk mode) after gltf-transform joins the meshes of each band.
+        var cats = new Dictionary<string, SortedDictionary<string, List<int>>>
+        {
+            ["exterior"] = new(), ["interior"] = new(), ["doors"] = new()
+        };
         var doorRx = new System.Text.RegularExpressions.Regex("(door|porte)(?!.*(frame|cadre))", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
 
         foreach (var inst in instances)
@@ -277,18 +290,32 @@ class GltfBuilder
                 ["extras"] = new Dictionary<string, object> { ["mlo"] = inst.Mlo, ["room"] = inst.Room }
             };
             if (inst.Scale != Vector3.One) node["scale"] = new[] { inst.Scale.X, inst.Scale.Y, inst.Scale.Z };
-            (doorRx.IsMatch(inst.Name) && !inst.Name.Contains("frame") && !inst.Name.Contains("cadre") && !inst.Name.Contains("bordure") ? doorNodes : inst.Mlo >= 0 ? interiorNodes : exteriorNodes).Add(nodes.Count);
+            bool isDoor = doorRx.IsMatch(inst.Name) && !inst.Name.Contains("frame") && !inst.Name.Contains("cadre") && !inst.Name.Contains("bordure");
+            string cat = isDoor ? "doors" : inst.Mlo >= 0 ? "interior" : "exterior";
+            var tiles = cats[cat];
+            var key = TileKey(meshBounds[mesh], p, q, inst.Scale);
+            if (!tiles.TryGetValue(key, out var tl)) tiles[key] = tl = new List<int>();
+            tl.Add(nodes.Count);
             nodes.Add(node);
         }
 
         // root: GTA is Z-up, glTF is Y-up -> rotate -90deg around X
         float s = (float)Math.Sqrt(0.5);
+        var catNodes = new List<int>();
+        foreach (var (cat, tiles) in cats)
+        {
+            var tileNodes = new List<int>();
+            foreach (var (key, children) in tiles)
+            {
+                tileNodes.Add(nodes.Count);
+                nodes.Add(new Dictionary<string, object> { ["name"] = $"tile|{cat}|{key}", ["children"] = children });
+            }
+            catNodes.Add(nodes.Count);
+            nodes.Add(new Dictionary<string, object> { ["name"] = cat, ["children"] = tileNodes });
+            Console.WriteLine($"{cat}: {tiles.Count} tiles");
+        }
         int root = nodes.Count;
-        int ext = nodes.Count; nodes.Add(new Dictionary<string, object> { ["name"] = "exterior", ["children"] = exteriorNodes });
-        int inter = nodes.Count; nodes.Add(new Dictionary<string, object> { ["name"] = "interior", ["children"] = interiorNodes });
-        int doors = nodes.Count; nodes.Add(new Dictionary<string, object> { ["name"] = "doors", ["children"] = doorNodes });
-        root = nodes.Count;
-        nodes.Add(new Dictionary<string, object> { ["name"] = "world", ["rotation"] = new[] { -s, 0f, 0f, s }, ["children"] = new[] { ext, inter, doors } });
+        nodes.Add(new Dictionary<string, object> { ["name"] = "world", ["rotation"] = new[] { -s, 0f, 0f, s }, ["children"] = catNodes });
 
         var gltf = new Dictionary<string, object>
         {
@@ -315,6 +342,30 @@ class GltfBuilder
         Console.WriteLine($"gltf: nodes={nodes.Count} meshes={meshes.Count} materials={materials.Count} textures={textures.Count} bin={bin.Length / 1048576.0:F1}MB");
         Console.WriteLine($"textures missing={texMissing} decode-failed={texFailed}");
         if (missingTexNames.Count > 0) Console.WriteLine("missing textures: " + string.Join(", ", missingTexNames.Take(60)));
+    }
+
+    // Floor elevations (GTA Z, relative to the MLO origin) used to bucket geometry per level.
+    static readonly float[] LevelFloors = { -6.5f, 2.1f, 6.4f, 10.8f, 36.6f };
+
+    static string TileKey((Vector3 min, Vector3 max) local, Vector3 pos, Quaternion rot, Vector3 scale)
+    {
+        Vector3 mn = new(float.MaxValue), mx = new(float.MinValue);
+        for (int c = 0; c < 8; c++)
+        {
+            var lp = new Vector3((c & 1) == 0 ? local.min.X : local.max.X, (c & 2) == 0 ? local.min.Y : local.max.Y, (c & 4) == 0 ? local.min.Z : local.max.Z) * scale;
+            var wp = pos + rot.Multiply(lp);
+            mn = Vector3.Min(mn, wp); mx = Vector3.Max(mx, wp);
+        }
+        string band;
+        if (mx.Z - mn.Z > 7f) band = "tall";
+        else
+        {
+            int lvl = 0;
+            for (int i = 0; i < LevelFloors.Length; i++) if (mn.Z >= LevelFloors[i] - 0.8f) lvl = i;
+            band = $"L{lvl}";
+        }
+        // one chunk per level band: finer grids multiply draw calls (one per material per chunk)
+        return band;
     }
 
     void WriteRooms(List<Program.MloInfo> mlos, Vector3 centre)
@@ -356,6 +407,7 @@ class GltfBuilder
         var models = d.DrawableModels?.High;
         var prims = new List<object>();
         meshExtent = 0;
+        curMin = new Vector3(float.MaxValue); curMax = new Vector3(float.MinValue);
         if (models != null)
             foreach (var model in models)
             {
@@ -372,6 +424,7 @@ class GltfBuilder
             idx = meshes.Count;
             meshes.Add(new { name = name, primitives = prims });
             meshExtents.Add(meshExtent);
+            meshBounds.Add((curMin, curMax));
         }
         meshIndex[d] = idx;
         return idx;
@@ -429,6 +482,7 @@ class GltfBuilder
             pos[i * 3] = tmp[0]; pos[i * 3 + 1] = tmp[1]; pos[i * 3 + 2] = tmp[2];
             mn = Vector3.Min(mn, new Vector3(tmp[0], tmp[1], tmp[2])); mx = Vector3.Max(mx, new Vector3(tmp[0], tmp[1], tmp[2]));
             meshExtent = Math.Max(meshExtent, Math.Max(Math.Abs(tmp[0]), Math.Max(Math.Abs(tmp[1]), Math.Abs(tmp[2]))));
+            curMin = Vector3.Min(curMin, new Vector3(tmp[0], tmp[1], tmp[2])); curMax = Vector3.Max(curMax, new Vector3(tmp[0], tmp[1], tmp[2]));
             if (hasN)
             {
                 ReadComp(vb, b + offN, tN, tmp);
