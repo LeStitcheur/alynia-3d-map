@@ -6,6 +6,7 @@ import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { CSS2DRenderer, CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js';
 import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
 import { computeBoundsTree, acceleratedRaycast } from 'three-mesh-bvh';
+import { buildMorgue } from './morgue.js';
 
 THREE.BufferGeometry.prototype.computeBoundsTree = computeBoundsTree;
 THREE.Mesh.prototype.raycast = acceleratedRaycast;
@@ -27,8 +28,8 @@ const LEVELS = [
 // Friendly names for the MLO room identifiers.
 const ROOM_NAMES = {
   R1accueil: 'Accueil', R2urgence: 'Urgences', R3rampe: 'Rampe d’accès', R4couloirbas: 'Couloir principal',
-  R5pharmacie: 'Pharmacie', R6veterinaire: 'Vétérinaire', R7labo: 'Laboratoire', R8vestieres: 'Vestiaires',
-  R9couloirplus1: 'Couloir du 1er', R10reeducation: 'Rééducation', R11petitsallehaut: 'Petite salle',
+  R5pharmacie: 'Pharmacie', R6veterinaire: 'Vétérinaire', R7labo: 'Vestiaires', R8vestieres: 'Vestiaires',
+  R9couloirplus1: 'Couloir du 1er', R10reeducation: 'Rééducation', R11petitsallehaut: 'Salles de consultations',
   R12operatoirehaut: 'Bloc opératoire', R13sallecomunelit1: 'Chambre commune', R14salleindivudual: 'Chambre individuelle',
   R15assenceur: 'Ascenseur', R16couloirchambreplus2: 'Couloir des chambres', R17chambreplus2: 'Chambres',
   R18passerelleplus2: 'Passerelle', R19couloirreunionplus2: 'Couloir réunion', R20sallereunion: 'Salle de réunion',
@@ -104,6 +105,9 @@ const groups = {};        // exterior / interior / doors
 let colliders = [];       // meshes used for walk-mode collisions
 let rooms = [];           // flattened room list
 let bounds = new THREE.Box3();
+const tiles = [];         // { obj, cat, band, box } culling chunks
+let needsRender = true;   // orbit mode renders on demand
+const invalidate = () => { needsRender = true; };
 
 // ---------------------------------------------------------------------------
 // Loading
@@ -130,15 +134,34 @@ async function load() {
     if (m.transparent || m.alphaMode === 'BLEND') { m.depthWrite = false; o.renderOrder = 2; }
     if (m.emissiveMap) m.emissiveIntensity = 0.7;
     m.side = THREE.DoubleSide;
-    o.matrixAutoUpdate = false;
   });
-  root.updateMatrixWorld(true);
   scene.add(root);
+
+  buildRooms(roomsData);
+
+  // the resource has no geometry for the morgue: add the reconstruction to the interior
+  const morgueRoom = rooms.find((r) => r.key === 'R20morgue');
+  if (morgueRoom && groups.interior) {
+    const morgue = buildMorgue(morgueRoom);
+    // groups.interior lives under the Z-up -> Y-up root rotation: attach() keeps world placement
+    root.updateMatrixWorld(true);
+    morgue.updateMatrixWorld(true);
+    groups.interior.attach(morgue);
+  }
+
+  root.updateMatrixWorld(true);
+  root.traverse((o) => { o.matrixAutoUpdate = false; });
   bounds.setFromObject(root);
 
   for (const g of ['exterior', 'interior']) groups[g]?.traverse((o) => { if (o.isMesh) colliders.push(o); });
 
-  buildRooms(roomsData);
+  // culling chunks produced by the exporter: one per category and level band (L0..L4, tall)
+  root.traverse((o) => {
+    if (!o.name?.startsWith('tile|')) return;
+    const [, cat, band] = o.name.split('|');
+    tiles.push({ obj: o, cat, band, box: new THREE.Box3().setFromObject(o) });
+  });
+
   buildLevelsUI();
   buildRoomList();
   buildLabels();
@@ -160,13 +183,15 @@ function countTris(root) {
 async function buildBVH() {
   const meshes = [];
   scene.traverse((o) => { if (o.isMesh) meshes.push(o); });
-  let done = 0;
+  let done = 0, slice = performance.now();
   for (const m of meshes) {
-    m.geometry.computeBoundsTree();
+    if (!m.geometry.boundsTree) m.geometry.computeBoundsTree();
     done++;
-    if (done % 4 === 0) {
+    // yield to the renderer every ~8 ms so the page keeps animating while this runs
+    if (performance.now() - slice > 8) {
       setStatus(`Préparation des collisions… ${Math.round((done / meshes.length) * 100)} %`);
       await new Promise((r) => setTimeout(r, 0));
+      slice = performance.now();
     }
   }
   state.bvhReady = true;
@@ -280,6 +305,7 @@ function updateLabels() {
     r.label.visible = !!show;
     r.label.element.classList.toggle('active', state.room === r);
   }
+  invalidate();
 }
 
 // ---------------------------------------------------------------------------
@@ -372,6 +398,36 @@ function applySection() {
   const clip = state.mode === 'orbit' && state.level;
   sectionPlane.constant = clip ? state.level.cut : 1e5;
   renderer.clippingPlanes = clip ? [sectionPlane] : [];
+  invalidate();
+  updateCulling();
+}
+
+// Hide whole floors that cannot be seen. Chunks are tagged L0..L4 (same order as LEVELS) or
+// "tall" (pieces spanning several floors, kept and clipped).
+//  - maquette + floor selected: interior of that floor only, exterior up to that floor
+//  - visite: interior of the current floor and its neighbours, everything within fog distance
+const WALK_VIEW = 110;
+function updateCulling() {
+  const walkLevel = state.mode === 'walk' ? LEVELS.indexOf(levelAtHeight(camera.position.y - EYE)) : -1;
+  const L = state.mode === 'orbit' ? state.level : null;
+  const li = L ? LEVELS.indexOf(L) : -1;
+  // whole-building view from outside: the facade hides the interior, skip it until we get close
+  const outside = state.mode === 'orbit' && !L && groups.exterior?.visible && bounds.distanceToPoint(camera.position) > 25;
+  let changed = false;
+  for (const t of tiles) {
+    const idx = t.band === 'tall' ? -1 : +t.band.slice(1);
+    let vis = true;
+    if (L) {
+      if (idx >= 0) vis = t.cat === 'exterior' ? idx <= li : idx === li;
+    } else if (walkLevel >= 0) {
+      if (idx >= 0 && t.cat !== 'exterior') vis = Math.abs(idx - walkLevel) <= 1;
+      vis = vis && t.box.distanceToPoint(camera.position) < WALK_VIEW;
+    } else if (outside) {
+      vis = t.cat === 'exterior';
+    }
+    if (t.obj.visible !== vis) { t.obj.visible = vis; changed = true; }
+  }
+  if (changed) invalidate();
 }
 
 function selectRoom(r, focus) {
@@ -406,12 +462,13 @@ function flyTo(target, distance, polar = 0.95) {
 }
 
 function stepTween(dt) {
-  if (!tween) return;
+  if (!tween) return false;
   tween.t = Math.min(1, tween.t + dt / tween.dur);
   const k = tween.t < 0.5 ? 4 * tween.t ** 3 : 1 - (-2 * tween.t + 2) ** 3 / 2;
   camera.position.lerpVectors(tween.p0, tween.p1, k);
   orbit.target.lerpVectors(tween.t0, tween.t1, k);
   if (tween.t >= 1) tween = null;
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -427,10 +484,14 @@ function pick(clientX, clientY) {
   pointer.set((clientX / innerWidth) * 2 - 1, -(clientY / innerHeight) * 2 + 1);
   raycaster.setFromCamera(pointer, camera);
   raycaster.far = Infinity;
-  raycaster.firstHitOnly = false;
-  const hits = raycaster.intersectObjects(colliders, false);
-  raycaster.firstHitOnly = true;
   const limit = renderer.clippingPlanes.length ? sectionPlane.constant : Infinity;
+  // start the ray at the section plane so the first hit per mesh is the visible one
+  const ray = raycaster.ray;
+  if (ray.origin.y > limit) {
+    if (ray.direction.y >= 0) return null;
+    ray.origin.addScaledVector(ray.direction, (ray.origin.y - limit + 0.01) / -ray.direction.y);
+  }
+  const hits = raycaster.intersectObjects(colliders, false);
   const hit = hits.find((h) => h.point.y <= limit + 0.01 && isVisible(h.object));
   if (!hit) return null;
   // nudge the point slightly into the room (hits are usually on floors/walls)
@@ -469,7 +530,7 @@ renderer.domElement.addEventListener('pointerup', (e) => {
 // Walk mode
 // ---------------------------------------------------------------------------
 const keys = new Set();
-const player = { feet: new THREE.Vector3(), velY: 0, onGround: false };
+const player = { feet: new THREE.Vector3(), vel: new THREE.Vector3(), velY: 0, onGround: false };
 const touchMove = new THREE.Vector2();
 
 function setMode(mode) {
@@ -483,7 +544,7 @@ function setMode(mode) {
   orbit.enabled = mode === 'orbit';
   tween = null;
   if (mode === 'walk') {
-    scene.fog.near = 60; scene.fog.far = 400;
+    scene.fog.near = 45; scene.fog.far = WALK_VIEW;
     const r = state.room || rooms.find((x) => x.key === 'R1accueil') || rooms[0];
     teleportTo(r);
   } else {
@@ -545,10 +606,12 @@ function teleportTo(r) {
   const spawn = findSpawn(r);
   player.feet.copy(spawn.pos);
   player.velY = 0;
+  player.vel.set(0, 0, 0);
   camera.position.copy(player.feet).add(new THREE.Vector3(0, EYE, 0));
   if (state.mode === 'walk') {
     camera.quaternion.setFromEuler(new THREE.Euler(-0.05, spawn.yaw, 0, 'YXZ'));
     selectRoom(r, false);
+    updateCulling();
   }
 }
 
@@ -601,7 +664,10 @@ function walk(dt) {
   const speed = run ? 6 : 2.8;
   _v.set(0, 0, 0).addScaledVector(_fwd, f).addScaledVector(_right, s);
   if (_v.lengthSq() > 1) _v.normalize();
-  _v.multiplyScalar(speed * dt);
+  // ease towards the wanted velocity (accelerate / decelerate instead of stopping dead)
+  player.vel.lerp(_v.multiplyScalar(speed), 1 - Math.exp(-dt * 10));
+  if (player.vel.lengthSq() < 1e-4) player.vel.set(0, 0, 0);
+  _v.copy(player.vel).multiplyScalar(dt);
 
   if (state.bvhReady && _v.lengthSq() > 0) {
     // horizontal collisions: probe at knee and chest height, slide along walls
@@ -626,6 +692,7 @@ function walk(dt) {
     }
   }
   player.feet.add(_v);
+  if (dt > 0) player.vel.copy(_v).divideScalar(dt); // keep the slide direction after collisions
 
   // gravity + ground following (handles stairs/ramps up to STEP)
   player.velY -= GRAVITY * dt;
@@ -689,8 +756,8 @@ function trackRoom() {
 // ---------------------------------------------------------------------------
 for (const b of document.querySelectorAll('#mode-seg button')) b.onclick = () => setMode(b.dataset.mode);
 $('#search').addEventListener('input', buildRoomList);
-$('#opt-exterior').addEventListener('change', (e) => { if (groups.exterior) groups.exterior.visible = e.target.checked; });
-$('#opt-doors').addEventListener('change', (e) => { if (groups.doors) groups.doors.visible = e.target.checked; });
+$('#opt-exterior').addEventListener('change', (e) => { if (groups.exterior) groups.exterior.visible = e.target.checked; updateCulling(); invalidate(); });
+$('#opt-doors').addEventListener('change', (e) => { if (groups.doors) groups.doors.visible = e.target.checked; invalidate(); });
 $('#opt-labels').addEventListener('change', (e) => { state.labels = e.target.checked; updateLabels(); });
 $('#opt-fly').addEventListener('change', (e) => { state.fly = e.target.checked; player.velY = 0; });
 $('#room-card-close').onclick = () => selectRoom(null);
@@ -704,24 +771,65 @@ addEventListener('resize', () => {
   camera.updateProjectionMatrix();
   renderer.setSize(innerWidth, innerHeight);
   labelRenderer.setSize(innerWidth, innerHeight);
+  invalidate();
 });
 
 // ---------------------------------------------------------------------------
 // Main loop
 // ---------------------------------------------------------------------------
+// Adaptive resolution: drop the pixel ratio while frames are slow, raise it back when there is headroom.
+// The display refresh period is measured while the loader shows (empty scene), so a 30 Hz screen
+// or a throttled browser is not mistaken for a slow GPU.
+const MAX_DPR = Math.min(window.devicePixelRatio, 1.5), MIN_DPR = 0.6;
+let dpr = MAX_DPR, frameMs = 16, sampled = 0, lastRendered = false, refreshMs = Infinity;
+const refreshSamples = [];
+function measureRefresh(dt) {
+  const ms = dt * 1000;
+  if (ms <= 4 || ms >= 100) return;
+  refreshSamples.push(ms);
+  if (refreshSamples.length > 120) refreshSamples.shift();
+  const sorted = [...refreshSamples].sort((a, b) => a - b);
+  refreshMs = sorted[sorted.length >> 1]; // median: robust to rAF jitter
+}
+function adaptResolution(dt) {
+  frameMs += (dt * 1000 - frameMs) * 0.08;
+  if (++sampled < 30) return;
+  sampled = 0;
+  const base = Number.isFinite(refreshMs) ? refreshMs : 16.7;
+  let next = dpr;
+  if (frameMs > base * 1.4 && dpr > MIN_DPR) next = Math.max(MIN_DPR, dpr - 0.15);
+  else if (frameMs < base * 1.12 && dpr < MAX_DPR) next = Math.min(MAX_DPR, dpr + 0.1);
+  if (next !== dpr) { dpr = next; renderer.setPixelRatio(dpr); }
+}
+
 const clock = new THREE.Clock();
-let mmTimer = 0;
+let mmTimer = 0, cullTimer = 0;
 renderer.setAnimationLoop(() => {
   const dt = clock.getDelta();
-  if (state.mode === 'orbit') { stepTween(dt); orbit.update(); }
-  else walk(dt);
-  renderer.render(scene, camera);
-  labelRenderer.render(scene, camera);
+  if (!tiles.length) { measureRefresh(dt); renderer.render(scene, camera); return; } // still loading
+  let active;
+  if (state.mode === 'orbit') {
+    const moving = stepTween(dt);
+    active = orbit.update() || moving;
+    if (active && (cullTimer += dt) > 0.2) { cullTimer = 0; updateCulling(); }
+  } else {
+    walk(dt);
+    active = true;
+    if ((cullTimer += dt) > 0.25) { cullTimer = 0; updateCulling(); }
+  }
+  // maquette mode only redraws when something changed: frees the GPU when idle
+  if (active || needsRender) {
+    needsRender = false;
+    renderer.render(scene, camera);
+    labelRenderer.render(scene, camera);
+    if (lastRendered) adaptResolution(dt);
+    lastRendered = true;
+  } else lastRendered = false;
   if ((mmTimer += dt) > 0.1) { mmTimer = 0; updateMinimap(); }
 });
 
 // handle for debugging from the browser console
-window.viewer = { THREE, scene, camera, state, player, rooms, keys, walk, setMode, setLevel, selectRoom, teleportTo };
+window.viewer = { THREE, scene, camera, orbit, renderer, tiles, state, player, rooms, keys, walk, updateCulling, setMode, setLevel, selectRoom, teleportTo };
 
 load().catch((err) => {
   console.error(err);
