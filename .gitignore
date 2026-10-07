@@ -1,0 +1,9 @@
+node_modules/
+build/
+tools/CodeWalker/
+tools/OceanExporter/bin/
+tools/OceanExporter/obj/
+.claude/
+*.log
+.DS_Store
+Thumbs.db
