@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Ocean Hospital — Plan 3D</title>
+  <meta name="description" content="Plan 3D explorable de l'Ocean Hospital : vue maquette par étage et visite libre à la première personne.">
+  <link rel="stylesheet" href="style.css">
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/",
+      "three-mesh-bvh": "https://cdn.jsdelivr.net/npm/three-mesh-bvh@0.8.3/build/index.module.js"
+    }
+  }
+  </script>
+</head>
+<body>
+  <div id="viewport"></div>
+
+  <!-- loading -->
+  <div id="loader">
+    <div class="loader-card">
+      <div class="brand"><span class="logo">✚</span> Ocean Hospital</div>
+      <div class="bar"><div id="loader-bar"></div></div>
+      <div id="loader-text">Chargement du modèle…</div>
+    </div>
+  </div>
+
+  <!-- side panel -->
+  <aside id="panel">
+    <header>
+      <div class="brand"><span class="logo">✚</span> Ocean Hospital</div>
+      <button id="panel-toggle" class="icon-btn" title="Masquer le panneau" aria-label="Masquer le panneau">‹</button>
+    </header>
+
+    <div class="section">
+      <div class="seg" id="mode-seg">
+        <button data-mode="orbit" class="active">Maquette</button>
+        <button data-mode="walk">Visite libre</button>
+      </div>
+    </div>
+
+    <div class="section">
+      <h3>Étages</h3>
+      <div class="levels" id="levels"></div>
+    </div>
+
+    <div class="section grow">
+      <h3>Salles</h3>
+      <input id="search" type="search" placeholder="Rechercher une salle…" autocomplete="off">
+      <ul id="rooms"></ul>
+    </div>
+
+    <div class="section">
+      <h3>Affichage</h3>
+      <label class="toggle"><input type="checkbox" id="opt-exterior" checked> Façade et extérieur <kbd>E</kbd></label>
+      <label class="toggle"><input type="checkbox" id="opt-labels" checked> Noms des salles <kbd>L</kbd></label>
+      <label class="toggle"><input type="checkbox" id="opt-doors" checked> Portes</label>
+      <label class="toggle"><input type="checkbox" id="opt-fly"> Vol libre (sans collisions) <kbd>F</kbd></label>
+    </div>
+    <footer id="status">—</footer>
+  </aside>
+  <button id="panel-open" class="icon-btn" title="Afficher le panneau" aria-label="Afficher le panneau">☰</button>
+
+  <!-- selected room card -->
+  <div id="room-card" hidden>
+    <button class="icon-btn close" id="room-card-close" aria-label="Fermer">×</button>
+    <div class="kicker" id="rc-level"></div>
+    <h2 id="rc-name"></h2>
+    <dl>
+      <dt>Dimensions</dt><dd id="rc-dims"></dd>
+      <dt>Surface approx.</dt><dd id="rc-area"></dd>
+    </dl>
+    <button id="rc-visit" class="primary">Visiter cette salle</button>
+  </div>
+
+  <!-- minimap -->
+  <div id="minimap"><svg id="minimap-svg"></svg><div id="minimap-title"></div></div>
+
+  <!-- hover tooltip -->
+  <div id="tooltip" hidden></div>
+
+  <!-- controls help -->
+  <div id="help">
+    <div data-for="orbit">Clic gauche : tourner · Clic droit : déplacer · Molette : zoom · Clic sur une salle : sélectionner</div>
+    <div data-for="walk" hidden>Cliquez pour entrer · <kbd>ZQSD</kbd>/<kbd>WASD</kbd> : marcher · <kbd>Maj</kbd> : courir · Souris : regarder · <kbd>Échap</kbd> : libérer la souris</div>
+  </div>
+  <div id="crosshair" hidden></div>
+  <div id="touch-pad" hidden><div id="touch-stick"></div></div>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>

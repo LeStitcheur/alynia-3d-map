@@ -1,0 +1,24 @@
+{
+  "name": "alynia-3d-map",
+  "version": "1.0.0",
+  "description": "Plan 3D explorable de l'Ocean Hospital (MLO FiveM) dans le navigateur.",
+  "private": true,
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/LeStitcheur/alynia-3d-map.git"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "deploy": "node scripts/deploy.mjs",
+    "build:model": "bash tools/build-model.sh"
+  },
+  "devDependencies": {
+    "@gltf-transform/cli": "^4.5.1",
+    "gh-pages": "^6.3.0"
+  }
+}
