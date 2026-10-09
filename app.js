@@ -28,7 +28,7 @@ const LEVELS = [
 // Friendly names for the MLO room identifiers.
 const ROOM_NAMES = {
   R1accueil: 'Accueil', R2urgence: 'Urgences', R3rampe: 'Rampe d’accès', R4couloirbas: 'Couloir principal',
-  R5pharmacie: 'Pharmacie', R6veterinaire: 'Vétérinaire', R7labo: 'Vestiaires', R8vestieres: 'Vestiaires',
+  R5pharmacie: 'Pharmacie', R6veterinaire: 'Vétérinaire', R7labo: 'Vestiaires', R8vestieres: 'Laboratoire',
   R9couloirplus1: 'Couloir du 1er', R10reeducation: 'Rééducation', R11petitsallehaut: 'Salles de consultations',
   R12operatoirehaut: 'Bloc opératoire', R13sallecomunelit1: 'Chambre commune', R14salleindivudual: 'Chambre individuelle',
   R15assenceur: 'Ascenseur', R16couloirchambreplus2: 'Couloir des chambres', R17chambreplus2: 'Chambres',
